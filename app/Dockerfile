@@ -1,0 +1,19 @@
+FROM python:3.12-slim
+
+ARG REVISION=local
+
+ENV APP_REVISION=${REVISION}
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+LABEL org.opencontainers.image.revision="${REVISION}"
+
+WORKDIR /app
+
+COPY app.py .
+
+USER 10001:10001
+
+EXPOSE 8000
+
+CMD ["python", "app.py"]

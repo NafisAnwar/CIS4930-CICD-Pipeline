@@ -1,0 +1,105 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cis4930-local-docker
+  cancel-in-progress: false
+
+jobs:
+  build-deploy-test:
+    name: Build, Deploy and Verify
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, local-docker]
+    timeout-minutes: 20
+
+    env:
+      TF_IN_AUTOMATION: "true"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+
+      - name: Verify development environment
+        run: |
+          git --version
+          python3 --version
+          terraform version
+          docker version
+
+      - name: Validate application source
+        run: |
+          python3 -m py_compile app/app.py
+          bash -n scripts/verify.sh
+
+      - name: Build Docker images
+        run: |
+          docker build \
+            --build-arg REVISION="$GITHUB_SHA" \
+            -t "cis4930-app:$GITHUB_SHA" app
+
+          docker build \
+            --build-arg REVISION="$GITHUB_SHA" \
+            -t "cis4930-gateway:$GITHUB_SHA" proxy
+
+          APP_IMAGE_ID="$(docker image inspect \
+            --format '{{.Id}}' "cis4930-app:$GITHUB_SHA")"
+
+          GATEWAY_IMAGE_ID="$(docker image inspect \
+            --format '{{.Id}}' "cis4930-gateway:$GITHUB_SHA")"
+
+          echo "TF_VAR_app_image_id=$APP_IMAGE_ID" >> "$GITHUB_ENV"
+          echo "TF_VAR_gateway_image_id=$GATEWAY_IMAGE_ID" >> "$GITHUB_ENV"
+
+          docker images --filter reference='cis4930-*'
+
+      - name: Initialize Terraform
+        run: |
+          mkdir -p "$HOME/.local/state/cis4930-assignment4"
+
+          terraform -chdir=terraform init \
+            -input=false \
+            -lockfile=readonly \
+            -backend-config="path=$HOME/.local/state/cis4930-assignment4/terraform.tfstate"
+
+      - name: Validate Terraform configuration
+        run: |
+          terraform -chdir=terraform fmt -check
+          terraform -chdir=terraform validate
+
+      - name: Plan infrastructure deployment
+        run: |
+          terraform -chdir=terraform plan \
+            -input=false \
+            -out="$RUNNER_TEMP/cis4930.tfplan"
+
+      - name: Apply Terraform deployment
+        run: |
+          terraform -chdir=terraform apply \
+            -input=false \
+            "$RUNNER_TEMP/cis4930.tfplan"
+
+          terraform -chdir=terraform output
+
+      - name: Verify deployed application
+        run: |
+          bash scripts/verify.sh "$GITHUB_SHA"
+
+      - name: Display deployment information
+        run: |
+          terraform -chdir=terraform state list
+          docker ps --filter name=cis4930-
+
+      - name: Clean temporary deployment plan
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/cis4930.tfplan"
